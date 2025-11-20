@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>FastAPI Voice Chat</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .control-panel { margin-bottom: 20px; padding: 15px; background: #f0f0f0; border-radius: 8px; }
+        #status { margin-top: 10px; color: green; }
+        .remote-audio { display: none; } /* Скрываем элементы аудио */
+    </style>
+</head>
+<body>
+    <h1>Голосовой чат на FastAPI</h1>
+    
+    <div class="control-panel">
+        <label>ID Комнаты: <input type="text" id="roomId" value="room1"></label>
+        <label>Ваш ID: <input type="text" id="clientId" value="user1"></label>
+        <button onclick="startChat()">Подключиться</button>
+        <div id="status">Ожидание подключения...</div>
+    </div>
+
+    <div id="users-list">
+        <h3>Участники:</h3>
+        <ul id="participants"></ul>
+    </div>
+
+    <script>
+        let ws;
+        let localStream;
+        let peerConnections = {}; // Храним соединения: { targetClientId: RTCPeerConnection }
+        
+        // STUN серверы от Google (бесплатные) нужны для прохождения NAT
+        const rtcConfig = {
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        };
+
+        async function startChat() {
+            const roomId = document.getElementById("roomId").value;
+            const clientId = document.getElementById("clientId").value;
+            
+            // 1. Получаем доступ к микрофону
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                document.getElementById("status").innerText = "Микрофон активен. Подключение к серверу...";
+            } catch (err) {
+                alert("Ошибка доступа к микрофону: " + err);
+                return;
+            }
+
+            // 2. Подключаемся к WebSocket
+            const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(`${protocol}://${window.location.host}/ws/${roomId}/${clientId}`);
+
+            ws.onmessage = async (event) => {
+                const msg = JSON.parse(event.data);
+                handleSignalingData(msg);
+            };
+
+            ws.onopen = () => {
+                document.getElementById("status").innerText = "Подключено к комнате " + roomId;
+                addParticipantToList(clientId + " (Вы)");
+            };
+        }
+
+        async function handleSignalingData(msg) {
+            const sender = msg.sender;
+            const payload = msg.payload;
+
+            switch (msg.type) {
+                case "user-joined":
+                    // Новый пользователь вошел. Мы (старички) звоним ему.
+                    console.log("Новый пользователь:", payload.clientId);
+                    addParticipantToList(payload.clientId);
+                    createPeerConnection(payload.clientId, true); // true = мы инициатор (создаем Offer)
+                    break;
+
+                case "offer":
+                    // Нам звонят. Принимаем Offer.
+                    console.log("Получен Offer от", sender);
+                    if (!peerConnections[sender]) createPeerConnection(sender, false);
+                    const pc = peerConnections[sender];
+                    await pc.setRemoteDescription(new RTCSessionDescription(payload));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    sendSignal("answer", answer, sender);
+                    break;
+
+                case "answer":
+                    // Нам ответили на наш звонок.
+                    console.log("Получен Answer от", sender);
+                    if (peerConnections[sender]) {
+                        await peerConnections[sender].setRemoteDescription(new RTCSessionDescription(payload));
+                    }
+                    break;
+
+                case "ice-candidate":
+                    // Информация о сети для соединения
+                    if (peerConnections[sender]) {
+                        await peerConnections[sender].addIceCandidate(new RTCIceCandidate(payload));
+                    }
+                    break;
+                
+                case "user-left":
+                    removeParticipant(payload.clientId);
+                    if (peerConnections[payload.clientId]) {
+                        peerConnections[payload.clientId].close();
+                        delete peerConnections[payload.clientId];
+                    }
+                    break;
+            }
+        }
+
+        function createPeerConnection(targetClientId, isInitiator) {
+            console.log("Создание P2P с", targetClientId);
+            const pc = new RTCPeerConnection(rtcConfig);
+            
+            // Добавляем наш локальный поток (микрофон) в соединение
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+            // Когда получаем поток от собеседника -> играем его
+            pc.ontrack = (event) => {
+                console.log("Получен аудио поток от", targetClientId);
+                const audio = document.createElement("audio");
+                audio.srcObject = event.streams[0];
+                audio.autoplay = true;
+                audio.className = "remote-audio";
+                audio.id = `audio-${targetClientId}`;
+                document.body.appendChild(audio);
+            };
+
+            // Обработка ICE кандидатов (сетевые пути)
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    sendSignal("ice-candidate", event.candidate, targetClientId);
+                }
+            };
+
+            peerConnections[targetClientId] = pc;
+
+            if (isInitiator) {
+                pc.createOffer().then(offer => {
+                    pc.setLocalDescription(offer);
+                    sendSignal("offer", offer, targetClientId);
+                });
+            }
+
+            return pc;
+        }
+
+        function sendSignal(type, payload, target) {
+            ws.send(JSON.stringify({
+                type: type,
+                payload: payload,
+                target: target
+            }));
+        }
+
+        // UI функции
+        function addParticipantToList(id) {
+            const ul = document.getElementById("participants");
+            const li = document.createElement("li");
+            li.id = `li-${id}`;
+            li.innerText = id;
+            ul.appendChild(li);
+        }
+
+        function removeParticipant(id) {
+            const li = document.getElementById(`li-${id}`);
+            if (li) li.remove();
+            const audio = document.getElementById(`audio-${id}`);
+            if (audio) audio.remove();
+        }
+    </script>
+</body>
+</html>
