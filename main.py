@@ -42,7 +42,19 @@ async def get(request: Request):
 async def websocket_endpoint(websocket: WebSocket, room_id: str, client_id: str):
     await manager.connect(websocket, room_id, client_id)
     
-    # Сообщаем другим, что подключился новый пользователь
+    # 1. Собираем список тех, кто УЖЕ в комнате (кроме нас самих)
+    existing_users = []
+    if room_id in manager.active_connections:
+        existing_users = [cid for cid in manager.active_connections[room_id] if cid != client_id]
+
+    # 2. Отправляем этот список ТОЛЬКО подключившемуся пользователю
+    if existing_users:
+        await websocket.send_text(json.dumps({
+            "type": "existing-users", 
+            "payload": {"users": existing_users}
+        }))
+
+    # 3. Сообщаем остальным, что мы пришли (как было раньше)
     await manager.broadcast_to_others(
         {"type": "user-joined", "payload": {"clientId": client_id}}, 
         room_id, 

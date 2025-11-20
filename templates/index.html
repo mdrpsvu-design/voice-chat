@@ -68,6 +68,17 @@
             const payload = msg.payload;
 
             switch (msg.type) {
+
+		case "existing-users":
+        	    // Сервер прислал список тех, кто уже здесь
+        	    msg.payload.users.forEach(userId => {
+            	    addParticipantToList(userId);
+            	    // Мы их просто добавляем в список. 
+            	    // Звонить им будем не мы, а они нам (согласно логике user-joined),
+            	    // или можно сделать двусторонний вызов, но пока оставим так во избежание конфликтов.
+        	    });
+        	    break;
+
                 case "user-joined":
                     // Новый пользователь вошел. Мы (старички) звоним ему.
                     console.log("Новый пользователь:", payload.clientId);
@@ -78,6 +89,7 @@
                 case "offer":
                     // Нам звонят. Принимаем Offer.
                     console.log("Получен Offer от", sender);
+		    if (!document.getElementById(`li-${sender}`)) addParticipantToList(sender);
                     if (!peerConnections[sender]) createPeerConnection(sender, false);
                     const pc = peerConnections[sender];
                     await pc.setRemoteDescription(new RTCSessionDescription(payload));
